@@ -24,6 +24,9 @@ chart and an SBOM, and tags `vX.Y.Z`. See CONTRIBUTING.md.
 - One log line per tool call, with its outcome, duration, tenant and actor. A
   database outage, a console login and a refused console login are logged too.
 - `logLevel` in the chart and `KEEPSAKE_LOG_LEVEL`.
+- `postgres.existingSecret` in the chart: in existing mode, both workloads read
+  `app-dsn` and `owner-dsn` from a Secret you create, and the chart renders no
+  `<release>-dsn`. A GitOps install no longer commits its DSNs.
 
 ### Changed
 
