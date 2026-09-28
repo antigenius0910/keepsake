@@ -28,6 +28,15 @@ chart and an SBOM, and tags `vX.Y.Z`. See CONTRIBUTING.md.
 ### Changed
 
 - `serve` logs JSON lines, not `key=value` text.
+- `index` and `log` are reserved in every directory, as OKF §3.1 requires. Import skips an
+  `index.md` or `log.md` anywhere in the bundle instead of failing on it. A write to a path such
+  as `architecture/index` is refused, and export refuses a stored one.
+- The exported `log.md` lists revisions newest first, as OKF §9 requires.
+- Each entry in the exported `index.md` carries the concept's description.
+- A write whose `frontmatter` holds `type`, `title` or `description` is refused. Export writes the
+  concept's own fields over any such key already stored, so it never exports an empty `type`.
+- Import accepts a closing `---` at the end of the file, a byte-order mark, and trailing blanks on
+  the opening `---`. It refused these conformant files with "type is required".
 
 ## 0.3.0 — 2026-09-24
 
