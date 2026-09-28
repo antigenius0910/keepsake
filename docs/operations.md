@@ -12,7 +12,9 @@ helm install keepsake oci://ghcr.io/roee-fs/charts/keepsake --version 0.3.0
   already be installed. Override `postgres.cluster.ownerPassword` and
   `appPassword` for any install that matters.
 - `existing` uses a Postgres you run. Set `postgres.dsn` for the server and
-  `postgres.ownerDsn` for the migration. They MUST be different roles.
+  `postgres.ownerDsn` for the migration. They MUST be different roles. A GitOps
+  install sets `postgres.existingSecret` instead, naming a Secret with keys
+  `app-dsn` and `owner-dsn` that exists before the migration hook runs.
 
 ## Database roles
 

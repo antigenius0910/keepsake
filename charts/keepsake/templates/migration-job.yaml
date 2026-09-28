@@ -40,7 +40,7 @@ spec:
             - name: KEEPSAKE_DSN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-dsn
+                  name: {{ include "keepsake.dsnSecret" . }}
                   key: owner-dsn
             - name: KEEPSAKE_SCHEMA
               value: {{ .Values.postgres.schema | quote }}

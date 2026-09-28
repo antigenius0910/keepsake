@@ -62,10 +62,10 @@ def _env(workload: dict[str, Any]) -> dict[str, Any]:
     return {e["name"]: e for e in _container(workload)["env"]}
 
 
-def _dsn_secret_key(workload: dict[str, Any], release: str = "keepsake") -> str:
+def _dsn_secret_key(workload: dict[str, Any], secret: str = "keepsake-dsn") -> str:
     """The Secret key the workload's KEEPSAKE_DSN resolves to."""
     ref = _env(workload)["KEEPSAKE_DSN"]["valueFrom"]["secretKeyRef"]
-    assert ref["name"] == f"{release}-dsn"
+    assert ref["name"] == secret
     return str(ref["key"])
 
 
@@ -144,6 +144,25 @@ def test_existing_mode_runs_the_migration_as_the_owner_dsn() -> None:
     dsns = _named(_render(EXISTING), "Secret", "keepsake-dsn")["stringData"]
     assert dsns["owner-dsn"] == "postgres://owner@db/keepsake"
     assert dsns["app-dsn"] == "postgres://app@db/keepsake"
+
+
+EXISTING_SECRET = {"postgres.mode": "existing", "postgres.existingSecret": "keepsake-db"}
+
+
+def test_an_existing_secret_replaces_the_rendered_dsns() -> None:
+    """Under GitOps the values are committed, so a rendered DSN Secret commits the
+    passwords in it."""
+    docs = _render(EXISTING_SECRET)
+    assert [d for d in docs if d["metadata"]["name"] == "keepsake-dsn"] == []
+    assert _dsn_secret_key(_only(docs, "Job"), secret="keepsake-db") == "owner-dsn"
+    assert _dsn_secret_key(_only(docs, "Deployment"), secret="keepsake-db") == "app-dsn"
+
+
+def test_managed_mode_ignores_an_existing_secret() -> None:
+    """The managed DSNs point at the cluster the chart creates, so only it can write them."""
+    docs = _render(dict(MANAGED, **{"postgres.existingSecret": "keepsake-db"}))
+    assert _dsn_secret_key(_only(docs, "Deployment")) == "app-dsn"
+    _named(docs, "Secret", "keepsake-dsn")
 
 
 def test_the_server_reads_the_variables_the_cli_reads() -> None:
@@ -247,7 +266,7 @@ def test_labels_derive_from_the_release_name() -> None:
     job = _only(docs, "Job")
     assert job["metadata"]["labels"]["app"] == "other-migrate"
     assert job["spec"]["template"]["metadata"]["labels"]["app"] == "other-migrate"
-    assert _dsn_secret_key(deployment, release="other") == "app-dsn"
+    assert _dsn_secret_key(deployment, secret="other-dsn") == "app-dsn"
 
 
 def test_readiness_asks_the_server_and_nothing_restarts_it() -> None:
