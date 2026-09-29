@@ -64,7 +64,7 @@ The chart configures no backups. You MUST set up one of these:
 ## Sizing
 
 - The `posting` table takes about 8 times the space of `concept`.
-- Every write appends a revision. Nothing prunes revisions yet.
+- Every write appends a revision, a delete included. Nothing prunes revisions yet.
 - The database sees `postgres.poolSize` × `replicaCount` connections.
 
 ## Auth and access
@@ -76,6 +76,36 @@ The chart configures no backups. You MUST set up one of these:
 - The console shares the port with `/mcp` and has its own password in
   `<release>-admin`. A GitOps install MUST set `admin.existingSecret`, or the
   password changes on every sync.
+
+## Uploading a bundle
+
+`PUT /bundle?prefix=P` replaces the caller's concepts under `P/` with a gzipped
+tar of OKF files. In jwt mode the token MUST carry `"scope": "bundle"`, which
+`keepsake token --scope bundle` mints. A token without it gets a 403. The file `x/y.md` becomes
+the concept `P/x/y`. Concepts outside `P/` are untouched. A file that fails
+`keepsake import`'s per-file checks refuses the whole upload with a 422 that
+lists every such file.
+
+```bash
+COPYFILE_DISABLE=1 tar -czf bundle.tgz -C ./bundle .
+curl -X PUT --data-binary @bundle.tgz \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://keepsake.example/bundle?prefix=docs/runbooks"
+```
+
+- A replace deletes concepts. Their history stays, ending in a `delete`
+  revision, and a concept whose content is unchanged is not rewritten. Operators
+  MUST NOT give a `bundle`-scoped token to anything an LLM drives. Auth mode none has no
+  tokens, so any client that reaches it can upload.
+- An upload MUST hold at least one concept. The limits are 32 MiB compressed,
+  64 MiB unpacked, 20,000 files, 1 MiB per file, and 256 KiB per concept body,
+  as for any write.
+- The server runs one upload at a time. Another upload meanwhile gets a 503 with
+  `Retry-After: 5`.
+- Links to concepts outside the bundle are not checked. Operators SHOULD run
+  `keepsake validate` on the directory first to catch them.
+- The archive MUST end with tar's end-of-archive marker. A stream cut between
+  entries gets a 400, so it cannot delete the files it lost.
 
 ## Metrics
 
@@ -103,11 +133,13 @@ tenant. The Go runtime and process metrics are included as well.
 | Message | Level | Fields |
 | --- | --- | --- |
 | `tool call` | info | `tool`, `outcome`, `duration_ms`, `tenant`, `actor` |
-| `database unavailable` | warn | `tool`, `err` |
+| `database unavailable` | warn | `tool` or `route`, `err` |
 | `console login` / `console login refused` | info / warn | `remote_addr` |
 | `api` | error | `method`, `route`, `err` |
 | `tool call failed` | error | `tool`, `err` |
+| `bundle replaced` | info | `tenant`, `actor`, `written`, `deleted` |
 | `refused /mcp request` | warn | `reason` |
+| `refused /bundle request` | warn | `reason`, and `actor` once the token verifies |
 
 No line carries a tool's arguments, a concept body, a token or a password.
 `remote_addr` is the TCP peer, so behind a proxy it names the proxy. At `warn`,

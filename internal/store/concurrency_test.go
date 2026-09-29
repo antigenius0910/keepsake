@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -24,8 +25,8 @@ func TestCreateReturnsNotCreatedWhenPathTaken(t *testing.T) {
 	c := okf.Concept{Path: "a/b", Type: "Concept", Body: "one"}
 
 	version, created, err := cs.Create(ctx, tenant, c, "agent")
-	if err != nil || !created || version != 1 {
-		t.Fatalf("first Create = %d, %v, %v, want 1, true, nil", version, created, err)
+	if err != nil || !created || version < 1 {
+		t.Fatalf("first Create = %d, %v, %v, want a version, true, nil", version, created, err)
 	}
 	_, created, err = cs.Create(ctx, tenant, c, "agent")
 	if err != nil || created {
@@ -37,22 +38,22 @@ func TestUpdateWithStaleVersionReturnsCurrentContent(t *testing.T) {
 	s := openApp(t)
 	cs := store.NewConceptStore(s)
 	tenant := uuid.New()
-	if _, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/c", Type: "Concept", Body: "v1"}, "agent"); err != nil {
+	one, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/c", Type: "Concept", Body: "v1"}, "agent")
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	one := 1
-	version, conflict, err := cs.Update(ctx, tenant, okf.Concept{Path: "a/c", Type: "Concept", Body: "v2"}, "agent", &one)
-	if err != nil || conflict != nil || version != 2 {
-		t.Fatalf("first update = %d, %v, %v, want 2, nil, nil", version, conflict, err)
+	two, conflict, err := cs.Update(ctx, tenant, okf.Concept{Path: "a/c", Type: "Concept", Body: "v2"}, "agent", &one)
+	if err != nil || conflict != nil || two <= one {
+		t.Fatalf("first update = %d, %v, %v, want a version above %d", two, conflict, err, one)
 	}
 
 	_, conflict, err = cs.Update(ctx, tenant, okf.Concept{Path: "a/c", Type: "Concept", Body: "v3"}, "agent", &one)
 	if err != nil || conflict == nil {
 		t.Fatalf("second update = %v, %v, want a conflict", conflict, err)
 	}
-	if conflict.CurrentVersion != 2 || conflict.CurrentBody != "v2" {
-		t.Fatalf("conflict = %+v, want {2 v2}", conflict)
+	if conflict.CurrentVersion != two || conflict.CurrentBody != "v2" {
+		t.Fatalf("conflict = %+v, want {%d v2}", conflict, two)
 	}
 }
 
@@ -60,13 +61,14 @@ func TestUpdateWithoutExpectedVersionIsLastWriteWins(t *testing.T) {
 	s := openApp(t)
 	cs := store.NewConceptStore(s)
 	tenant := uuid.New()
-	if _, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/d", Type: "Concept", Body: "v1"}, "agent"); err != nil {
+	one, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/d", Type: "Concept", Body: "v1"}, "agent")
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	version, conflict, err := cs.Update(ctx, tenant, okf.Concept{Path: "a/d", Type: "Concept", Body: "v2"}, "agent", nil)
-	if err != nil || conflict != nil || version != 2 {
-		t.Fatalf("update = %d, %v, %v, want 2, nil, nil", version, conflict, err)
+	if err != nil || conflict != nil || version <= one {
+		t.Fatalf("update = %d, %v, %v, want a version above %d", version, conflict, err, one)
 	}
 
 	var body string
@@ -106,7 +108,8 @@ func TestExactlyOneOfTwoConcurrentUpdatesWins(t *testing.T) {
 	s := openApp(t)
 	cs := store.NewConceptStore(s)
 	tenant := uuid.New()
-	if _, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/e", Type: "Concept", Body: "v1"}, "agent"); err != nil {
+	one, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/e", Type: "Concept", Body: "v1"}, "agent")
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -121,7 +124,7 @@ func TestExactlyOneOfTwoConcurrentUpdatesWins(t *testing.T) {
 	results := make(chan result, 2)
 
 	race := func(actor, body string) {
-		one := 1
+		one := one
 		ready.Done()
 		<-start
 		version, conflict, err := cs.Update(ctx, tenant, okf.Concept{Path: "a/e", Type: "Concept", Body: body}, actor, &one)
@@ -139,18 +142,18 @@ func TestExactlyOneOfTwoConcurrentUpdatesWins(t *testing.T) {
 		}
 	}
 
-	var winners, conflicts int
+	var winners, conflicts, won int
 	for _, r := range []result{r1, r2} {
-		switch {
-		case r.conflict == nil:
+		if r.conflict == nil {
 			winners++
-			if r.version != 2 {
-				t.Errorf("winner version = %d, want 2", r.version)
-			}
-		default:
+			won = r.version
+		}
+	}
+	for _, r := range []result{r1, r2} {
+		if r.conflict != nil {
 			conflicts++
-			if r.conflict.CurrentVersion != 2 {
-				t.Errorf("conflict.CurrentVersion = %d, want 2", r.conflict.CurrentVersion)
+			if r.conflict.CurrentVersion != won {
+				t.Errorf("conflict.CurrentVersion = %d, want the winner's %d", r.conflict.CurrentVersion, won)
 			}
 		}
 	}
@@ -163,11 +166,12 @@ func TestEveryWriteAppendsARevision(t *testing.T) {
 	s := openApp(t)
 	cs := store.NewConceptStore(s)
 	tenant := uuid.New()
-	if _, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/f", Type: "Concept", Body: "v1"}, "agent"); err != nil {
+	one, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/f", Type: "Concept", Body: "v1"}, "agent")
+	if err != nil {
 		t.Fatal(err)
 	}
-	one := 1
-	if _, _, err := cs.Update(ctx, tenant, okf.Concept{Path: "a/f", Type: "Concept", Body: "v2"}, "agent", &one); err != nil {
+	two, _, err := cs.Update(ctx, tenant, okf.Concept{Path: "a/f", Type: "Concept", Body: "v2"}, "agent", &one)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,7 +181,7 @@ func TestEveryWriteAppendsARevision(t *testing.T) {
 		body    string
 	}
 	var rows []row
-	err := s.Scope(ctx, tenant, func(tx pgx.Tx) error {
+	err = s.Scope(ctx, tenant, func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx,
 			"SELECT version, op, snapshot->>'body' FROM concept_revision WHERE path = 'a/f' ORDER BY version")
 		if err != nil {
@@ -196,7 +200,7 @@ func TestEveryWriteAppendsARevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []row{{1, "create", "v1"}, {2, "update", "v2"}}
+	want := []row{{one, "create", "v1"}, {two, "update", "v2"}}
 	if !reflect.DeepEqual(rows, want) {
 		t.Fatalf("rows = %+v, want %+v", rows, want)
 	}
@@ -352,12 +356,18 @@ func TestImportManyOverwritesTakenPathsInBundleOrder(t *testing.T) {
 	if n, err := cs.ImportMany(ctx, tenant, bundle, "agent"); err != nil || n != 3 {
 		t.Fatalf("ImportMany = %d, %v", n, err)
 	}
-	if c, err := cs.Read(ctx, tenant, "a"); err != nil || c.Version != 3 || c.Body != "3" {
-		t.Fatalf("Read(a) = %+v, %v, want version 3 with body 3", c, err)
+	want := []string{"a create 1 t", "a update 2 t", "a update 3 t", "b create b t"}
+	if got := revisionLog(t, s, tenant); !reflect.DeepEqual(got, want) {
+		t.Fatalf("revisions = %q, want %q", got, want)
 	}
+}
+
+// revisionLog is each revision as "path op body", then whether its snapshot names its version, in version order per path.
+func revisionLog(t *testing.T, s *store.Store, tenant uuid.UUID) []string {
+	t.Helper()
 	var log []string
 	err := s.Scope(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, "SELECT concat_ws(' ', path, version, op, snapshot->>'body', snapshot->>'version') "+
+		rows, err := tx.Query(ctx, "SELECT concat_ws(' ', path, op, snapshot->>'body', (snapshot->>'version')::bigint = version) "+
 			"FROM concept_revision ORDER BY path, version")
 		if err != nil {
 			return err
@@ -365,7 +375,213 @@ func TestImportManyOverwritesTakenPathsInBundleOrder(t *testing.T) {
 		log, err = pgx.CollectRows(rows, pgx.RowTo[string])
 		return err
 	})
-	if want := []string{"a 1 create 1 1", "a 2 update 2 2", "a 3 update 3 3", "b 1 create b 1"}; err != nil || !reflect.DeepEqual(log, want) {
-		t.Fatalf("revisions = %q, %v, want %q", log, err, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return log
+}
+
+// Pushing the same bundle again MUST NOT bump versions, or every agent's expected_version goes stale.
+func TestImportManySkipsAnUnchangedConcept(t *testing.T) {
+	s := openApp(t)
+	cs := store.NewConceptStore(s)
+	tenant := uuid.New()
+	fm := okf.NewMap()
+	fm.Set("tags", []any{"db"})
+	fm.Set("owner", "sre")
+	bundle := []okf.Concept{{Path: "a", Type: "Concept", Body: "same", Frontmatter: fm, Links: []string{"b"}}}
+	if _, err := cs.ImportMany(ctx, tenant, bundle, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := cs.Read(ctx, tenant, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same frontmatter with its keys in another order is the same jsonb.
+	reordered := okf.NewMap()
+	reordered.Set("owner", "sre")
+	reordered.Set("tags", []any{"db"})
+	bundle[0].Frontmatter = reordered
+	if n, err := cs.ImportMany(ctx, tenant, bundle, "agent"); err != nil || n != 0 {
+		t.Fatalf("ImportMany = %d, %v, want 0 written", n, err)
+	}
+	if after, err := cs.Read(ctx, tenant, "a"); err != nil || after.Version != before.Version {
+		t.Fatalf("Read(a) = %+v, %v, want version %d", after, err, before.Version)
+	}
+	if got := revisionLog(t, s, tenant); len(got) != 1 {
+		t.Fatalf("revisions = %q, want only the create", got)
+	}
+}
+
+func listPaths(t *testing.T, cs *store.ConceptStore, tenant uuid.UUID) []string {
+	t.Helper()
+	got, err := cs.List(ctx, tenant, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return paths(got)
+}
+
+func TestReplacePrefixMakesThePrefixExactlyTheBundle(t *testing.T) {
+	cs := store.NewConceptStore(openApp(t))
+	tenant := uuid.New()
+	seed := []okf.Concept{
+		{Path: "docs", Type: "Doc"},
+		{Path: "docs/keep", Type: "Doc", Body: "old"},
+		{Path: "docs/gone", Type: "Doc"},
+		{Path: "docsx/other", Type: "Doc"},
+		{Path: "notes/agent", Type: "Note"},
+	}
+	if _, err := cs.ImportMany(ctx, tenant, seed, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	bundle := []okf.Concept{{Path: "docs/keep", Type: "Doc", Body: "new"}, {Path: "docs/sub/added", Type: "Doc"}}
+	if written, deleted, err := cs.ReplacePrefix(ctx, tenant, "docs", bundle, "platform"); err != nil || written != 2 || deleted != 1 {
+		t.Fatalf("ReplacePrefix = %d, %d, %v, want 2, 1, nil", written, deleted, err)
+	}
+	want := []string{"docs", "docs/keep", "docs/sub/added", "docsx/other", "notes/agent"}
+	if got := listPaths(t, cs, tenant); !reflect.DeepEqual(got, want) {
+		t.Fatalf("paths = %v, want %v", got, want)
+	}
+	if c, err := cs.Read(ctx, tenant, "docs/keep"); err != nil || c.Body != "new" {
+		t.Fatalf("Read(docs/keep) = %+v, %v", c, err)
+	}
+}
+
+// A re-created path MUST NOT reuse a version, or a stale expected_version would overwrite the new concept.
+func TestADeletedPathReturnsAtANewVersionWithItsHistory(t *testing.T) {
+	s := openApp(t)
+	cs := store.NewConceptStore(s)
+	tenant := uuid.New()
+	replace := func(path, body string) {
+		t.Helper()
+		if _, _, err := cs.ReplacePrefix(ctx, tenant, "docs", []okf.Concept{{Path: path, Type: "Doc", Body: body}}, "platform"); err != nil {
+			t.Fatalf("ReplacePrefix(%s): %v", path, err)
+		}
+	}
+	replace("docs/a", "old")
+	stale, err := cs.Read(ctx, tenant, "docs/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replace("docs/b", "")
+	replace("docs/a", "new")
+
+	_, conflict, err := cs.Update(ctx, tenant, okf.Concept{Path: "docs/a", Type: "Doc", Body: "from a stale read"}, "agent", &stale.Version)
+	if err != nil || conflict == nil || conflict.CurrentBody != "new" {
+		t.Fatalf("Update(stale) = %+v, %v, want a conflict against the new body", conflict, err)
+	}
+	want := []string{"docs/a create old t", "docs/a delete old t", "docs/a create new t", "docs/b create  t", "docs/b delete  t"}
+	if got := revisionLog(t, s, tenant); !reflect.DeepEqual(got, want) {
+		t.Fatalf("revisions = %q, want %q", got, want)
+	}
+}
+
+func TestReplacePrefixIsOneTransaction(t *testing.T) {
+	cs := store.NewConceptStore(openApp(t))
+	tenant := uuid.New()
+	if _, err := cs.ImportMany(ctx, tenant, []okf.Concept{{Path: "docs/old", Type: "Doc"}}, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	bundle := []okf.Concept{{Path: "docs/new", Type: "Doc", Body: "bad\x00body"}}
+	if _, _, err := cs.ReplacePrefix(ctx, tenant, "docs", bundle, "platform"); err == nil {
+		t.Fatal("ReplacePrefix = nil error, want one from the NUL byte")
+	}
+	if got := listPaths(t, cs, tenant); !reflect.DeepEqual(got, []string{"docs/old"}) {
+		t.Fatalf("paths = %v, want the delete rolled back", got)
+	}
+}
+
+func TestReplacePrefixRefusesAPathOutsideIt(t *testing.T) {
+	cs := store.NewConceptStore(openApp(t))
+	if _, _, err := cs.ReplacePrefix(ctx, uuid.New(), "docs", []okf.Concept{{Path: "docsx/a", Type: "Doc"}}, "platform"); err == nil {
+		t.Fatal("ReplacePrefix = nil error")
+	}
+}
+
+// Without a tenant-wide lock, a replace of docs and one of docs/sub each keep the path the other inserted.
+func TestConcurrentReplacesOfNestedPrefixesLeaveOneBundle(t *testing.T) {
+	cs := store.NewConceptStore(openApp(t))
+	for range 10 {
+		tenant := uuid.New()
+		var wg sync.WaitGroup
+		for _, r := range [][2]string{{"docs", "docs/sub/x"}, {"docs/sub", "docs/sub/y"}} {
+			wg.Go(func() {
+				if _, _, err := cs.ReplacePrefix(ctx, tenant, r[0], []okf.Concept{{Path: r[1], Type: "Doc"}}, "platform"); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+		wg.Wait()
+		if got := listPaths(t, cs, tenant); len(got) != 1 {
+			t.Fatalf("paths = %v, want exactly one bundle", got)
+		}
+	}
+}
+
+// A delete revision MUST follow an update committed while ReplacePrefix waited on its row lock.
+func TestReplacePrefixLogsItsDeleteAfterAnUpdateItWaitedFor(t *testing.T) {
+	s := openApp(t)
+	cs := store.NewConceptStore(s)
+	tenant := uuid.New()
+	if _, err := cs.ImportMany(ctx, tenant, []okf.Concept{{Path: "docs/gone", Type: "Doc"}}, "agent"); err != nil {
+		t.Fatal(err)
+	}
+
+	locked, release := make(chan int), make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- s.Scope(ctx, tenant, func(tx pgx.Tx) error {
+			var pid int
+			_, err := tx.Exec(ctx, "WITH w AS (UPDATE concept SET version = nextval('version_seq'), body = 'raced' WHERE path = 'docs/gone' RETURNING version) "+
+				"INSERT INTO concept_revision (tenant_id, path, version, op, snapshot, updated_by) "+
+				"SELECT $1, 'docs/gone', version, 'update', jsonb_build_object('version', version, 'body', 'raced'), 'agent' FROM w", tenant)
+			if err == nil {
+				err = tx.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
+			}
+			locked <- pid
+			<-release
+			return err
+		})
+	}()
+	pid := <-locked
+	if pid == 0 {
+		close(release)
+		t.Fatal(<-held)
+	}
+
+	replaced := make(chan error, 1)
+	go func() {
+		_, _, err := cs.ReplacePrefix(ctx, tenant, "docs", []okf.Concept{{Path: "docs/kept", Type: "Doc"}}, "platform")
+		replaced <- err
+	}()
+	// Commit only once the replace is queued behind the held row lock.
+	for blocked := false; !blocked; time.Sleep(10 * time.Millisecond) {
+		select {
+		case err := <-replaced:
+			close(release)
+			t.Fatalf("ReplacePrefix = %v before it waited on the row lock", err)
+		default:
+		}
+		err := s.Scope(ctx, tenant, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", pid).Scan(&blocked)
+		})
+		if err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+	}
+	close(release)
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-replaced; err != nil {
+		t.Fatal(err)
+	}
+
+	// The delete saw the raced update, so its snapshot holds the body that update wrote.
+	want := []string{"docs/gone create  t", "docs/gone update raced t", "docs/gone delete raced t", "docs/kept create  t"}
+	if got := revisionLog(t, s, tenant); !reflect.DeepEqual(got, want) {
+		t.Fatalf("revisions = %q, want %q", got, want)
 	}
 }
