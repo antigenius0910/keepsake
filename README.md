@@ -40,7 +40,7 @@ reaches the port.
 On Kubernetes:
 
 ```bash
-helm install keepsake oci://ghcr.io/roee-fs/charts/keepsake --version 0.3.0
+helm install keepsake oci://ghcr.io/roee-fs/charts/keepsake --version 0.4.0
 ```
 
 [`docs/operations.md`](docs/operations.md) covers Postgres modes, roles,
@@ -105,7 +105,7 @@ postgres:
 ```
 
 ```bash
-helm install keepsake oci://ghcr.io/roee-fs/charts/keepsake --version 0.3.0 \
+helm install keepsake oci://ghcr.io/roee-fs/charts/keepsake --version 0.4.0 \
   -f values.yaml --wait
 ```
 
