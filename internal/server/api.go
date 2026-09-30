@@ -620,7 +620,7 @@ func (a *api) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hits, err := a.cs.Search(r.Context(), *tenant, q, limit, nil)
-	reply(w, r, convert(hits, func(h store.Hit) searchHit { return searchHit(h) }), err)
+	reply(w, r, convert(hits, hitOf), err)
 }
 
 func (a *api) grep(w http.ResponseWriter, r *http.Request) {
