@@ -88,6 +88,50 @@ def test_parse_keeps_keepsake_calls_in_order_and_marks_errors() -> None:
     assert result["result"] == "Run pg_ctl promote."
 
 
+def test_parse_counts_file_tools_over_the_exported_memory() -> None:
+    calls, _ = grade.parse(
+        [
+            _line(
+                "assistant",
+                {
+                    "type": "tool_use",
+                    "id": "1",
+                    "name": "Grep",
+                    "input": {"pattern": "promote"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "2",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/x/memory/runbooks/db-failover.md"},
+                },
+                {"type": "tool_use", "id": "3", "name": "Bash", "input": {"command": "ls"}},
+            ),
+        ]
+    )
+    assert [c["tool"] for c in calls] == ["okf_grep", "okf_read"]
+    checks = grade.grade({"reads": ["runbooks/db-failover"]}, calls, "", {}, {})
+    assert checks == {"used keepsake": True, "read runbooks/db-failover": True}
+
+
+def test_parse_skips_file_tools_outside_the_exported_memory(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    calls, _ = grade.parse(
+        [
+            _line(
+                "assistant",
+                {"type": "tool_use", "id": "1", "name": "Grep", "input": {"pattern": "x"}},
+                {"type": "tool_use", "id": "2", "name": "Read", "input": {"file_path": "/etc/hosts"}},
+                {"type": "tool_use", "id": "3", "name": "Glob", "input": {"pattern": "*", "path": ".."}},
+                {"type": "tool_use", "id": "4", "name": "Read", "input": {"file_path": f"{root}/a.md"}},
+            ),
+        ],
+        root,
+    )
+    assert [c["tool"] for c in calls] == ["okf_grep", "okf_read"]
+    assert calls[1]["input"]["path"] == "a.md"
+
+
 def test_grade_normalizes_read_paths_and_diffs_the_store() -> None:
     calls, result = grade.parse(TRANSCRIPT)
     before = {"runbooks/db-failover": "page `#dba-oncall`"}
@@ -414,3 +458,53 @@ def test_summary_tolerates_rows_without_link_metrics() -> None:
     for key in ("reads", "offered", "followed", "link_only_reads", "missed_links"):
         row.pop(key, None)
     assert "| v | 1/1 |" in grade.summarize([row])
+
+
+BEAM_ROW = {
+    "conversation_id": "7",
+    "chat": [
+        [
+            {"role": "user", "content": "Use tabs.", "time_anchor": "March-01-2024"},
+            {"role": "assistant", "content": "Noted.", "time_anchor": "March-01-2024"},
+            {"role": "user", "content": "x" * 300_000, "time_anchor": "March-01-2024"},
+        ]
+    ],
+    "probing_questions": repr(
+        {
+            "instruction_following": [
+                {"question": "Format this.", "rubric": ["Uses tabs"]}
+            ]
+        }
+    ),
+}
+
+
+def test_a_beam_conversation_becomes_storable_concepts(tmp_path: Path) -> None:
+    import beam
+
+    beam.bundle(BEAM_ROW, tmp_path)
+    files = sorted(tmp_path.rglob("*.md"))
+    assert files[0].relative_to(tmp_path).as_posix() == "session/001/001.md"
+    assert "user: Use tabs." in files[0].read_text()
+    # The 300 KB turn is split, since keepsake caps a body at 256 KiB.
+    assert len(files) >= 3
+    assert all(len(f.read_bytes()) <= 256 * 1024 for f in files)
+
+
+def test_a_beam_task_carries_the_official_rubric_judge() -> None:
+    import beam
+
+    [task] = beam.tasks(BEAM_ROW, "1M", beam.OUT / "bundles" / "1M-7")
+    assert task["id"] == "1M-7-instruction_following-1"
+    assert task["kind"] == "instruction_following"
+    assert task["prompt"] == "Format this."
+    assert task["read_only"] is True
+    [prompt] = task["expect"]["judge_rubric"]
+    assert "RUBRIC CRITERION (what to check): Uses tabs" in prompt
+    assert grade.RESPONSE in prompt
+
+
+def test_a_rubric_judge_reply_scores_from_its_json() -> None:
+    assert run.rubric_score('```json\n{"score": 0.5, "reason": "partly"}\n```') == 0.5
+    assert run.rubric_score('{"score": 1.0}') == 1.0
+    assert run.rubric_score("no json") == 0.0
