@@ -172,11 +172,11 @@ func TestAVerifiedCallerWithoutAUsableTenantIsForbidden(t *testing.T) {
 	}
 }
 
-func TestFixedTenantBindsEveryRequestToOneTenantAsMCP(t *testing.T) {
+func TestFixedTenantBindsEveryRequestToOneTenantAsThisKeepsake(t *testing.T) {
 	tenant := uuid.New()
 	rec := httptest.NewRecorder()
 	FixedTenant(tenant)(echoCaller).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", nil))
-	if rec.Code != 200 || rec.Body.String() != tenant.String()+" mcp" {
+	if rec.Code != 200 || rec.Body.String() != tenant.String()+" keepsake/"+Version {
 		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
 	}
 }

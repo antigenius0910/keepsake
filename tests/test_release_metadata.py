@@ -31,7 +31,7 @@ def test_the_version_is_the_same_in_every_place_that_states_it() -> None:
             assert service["image"].endswith(f":{chart['appVersion']}"), (
                 f"compose.yaml {name} pulls {service['image']!r}, not {chart['appVersion']!r}"
             )
-    for doc in ("README.md", "docs/operations.md"):
+    for doc in ("README.md", "docs/operations.md", "docs/deploy.md", "llms.txt"):
         for pinned in re.findall(r"--version ([0-9.]+)|cmd/keepsake@v([0-9.]+)", (ROOT / doc).read_text()):
             assert chart["appVersion"] in pinned, f"{doc} pins {pinned}, not {chart['appVersion']!r}"
 
@@ -61,3 +61,11 @@ def test_the_community_health_files_are_where_github_looks_for_them(name: str) -
     """GitHub's community profile only counts a file in a supported location, so a
     correct CONTRIBUTING in the wrong directory reads as an absent one."""
     assert (ROOT / name).is_file(), f"{name} is missing"
+
+
+def test_the_server_states_the_released_version() -> None:
+    """The server records `keepsake/<Version>` as its writer, so a stale constant
+    mislabels every write a release makes."""
+    chart = YAML(typ="safe").load((CHART / "Chart.yaml").read_text())
+    source = (ROOT / "internal" / "server" / "version.go").read_text()
+    assert f'const Version = "{chart["appVersion"]}"' in source

@@ -163,9 +163,9 @@ func TestUpdateKeepsTheFieldsItWasNotGiven(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := read(t, tools, "a/b")
-	fm, _ := json.Marshal(c.Frontmatter)
-	if c.Title != "Original" || c.Description != "D" || c.Body != "v2" || string(fm) != `{"owner":"sec"}` {
-		t.Fatalf("got %+v %s", c, fm)
+	owner, _ := c.Frontmatter.Get("owner")
+	if c.Title != "Original" || c.Description != "D" || c.Body != "v2" || owner != "sec" || !slices.Equal(c.Frontmatter.Keys(), []string{"owner", "generated"}) {
+		t.Fatalf("got %+v", c)
 	}
 }
 
@@ -180,9 +180,10 @@ func TestANullFrontmatterIsRefusedRatherThanErasing(t *testing.T) {
 	seed(t, tools, "a/b", map[string]any{"body": "v1", "frontmatter": obj("owner", "sec")})
 	_, err := tools.Update(ctx, "a/b", nil, map[string]any{"body": "v2", "frontmatter": nil})
 	wantToolError(t, err, "frontmatter must be an object")
-	fm, _ := json.Marshal(read(t, tools, "a/b").Frontmatter)
-	if string(fm) != `{"owner":"sec"}` {
-		t.Fatalf("frontmatter = %s", fm)
+	if fm := read(t, tools, "a/b").Frontmatter; !slices.Equal(fm.Keys(), []string{"owner", "generated"}) {
+		t.Fatalf("frontmatter keys = %v", fm.Keys())
+	} else if owner, _ := fm.Get("owner"); owner != "sec" {
+		t.Fatalf("owner = %v", owner)
 	}
 }
 
@@ -222,7 +223,7 @@ func TestUpdateOfAnotherTenantsPathIsIndistinguishableFromAbsent(t *testing.T) {
 func TestUpdateOfARowThatVanishedMidWriteIsNotFound(t *testing.T) {
 	tools := newTools(t)
 	phantom := okf.Concept{Path: "ghost/path", Type: "Concept", Frontmatter: okf.NewMap()}
-	_, err := tools.write(ctx, phantom, "ghost/path", nil, map[string]any{"body": "x"})
+	_, err := tools.write(ctx, phantom, "ghost/path", nil, map[string]any{"body": "x"}, true)
 	if msg := toolError(t, err); msg != "no concept at ghost/path" {
 		t.Fatalf("got %q", msg)
 	}
@@ -267,12 +268,16 @@ func TestSearchAndReadCarryTrustSignals(t *testing.T) {
 	fm.Set("stale_after", "2000-01-01T00:00:00Z")
 	fm.Set("verified", obj("by", "human:ann", "at", "2026-06-25T09:00:00Z"))
 	fm.Set("generated", obj("by", "agent/v1", "at", "2026-06-20T22:53:05Z"))
-	seed(t, tools, "a/old", map[string]any{"title": "Zqxold", "frontmatter": fm})
+	// Written through the store, since a tool write would replace generated with its own stamp.
+	if _, _, err := tools.c.Create(ctx, tools.t, okf.Concept{Path: "a/old", Type: "Concept", Title: "Zqxold", Frontmatter: fm}, "process:import"); err != nil {
+		t.Fatal(err)
+	}
 	seed(t, tools, "a/new", map[string]any{"title": "Zqxold"})
+	_, stamped := generated(t, tools, "a/new")
 
 	want := map[string]okf.Signals{
 		"a/old": {Status: "deprecated", Stale: true, Trust: okf.HumanReviewed, GeneratedAt: "2026-06-20T22:53:05Z"},
-		"a/new": {Status: "stable", Trust: okf.Unverified},
+		"a/new": {Status: "stable", Trust: okf.Unverified, GeneratedAt: stamped},
 	}
 	hits, err := tools.Search(ctx, "zqxold", 5, nil)
 	if err != nil || len(hits) != 2 {
@@ -298,6 +303,82 @@ func TestSearchRanksADeprecatedConceptLikeAnyOther(t *testing.T) {
 	hits, err := tools.Search(ctx, "zqxtie", 5, nil)
 	if err != nil || len(hits) != 2 || hits[0].Score != hits[1].Score {
 		t.Fatalf("hits = %+v, %v", hits, err)
+	}
+}
+
+func generated(t *testing.T, tools *Tools, path string) (by, at string) {
+	t.Helper()
+	g, _ := read(t, tools, path).Frontmatter.Get("generated")
+	m, _ := g.(*okf.Map)
+	if m == nil {
+		t.Fatalf("%s has no generated: %v", path, g)
+	}
+	b, _ := m.Get("by")
+	a, _ := m.Get("at")
+	by, _ = b.(string)
+	at, _ = a.(string)
+	return by, at
+}
+
+func TestEveryAuthoringWriteStampsWhoWroteItAndWhen(t *testing.T) {
+	cs, tenant := conceptStore(t), uuid.New()
+	agent, human := NewTools(cs, tenant, "support-agent/1.4"), NewTools(cs, tenant, "human:ann")
+	before := time.Now().UTC().Add(-time.Minute)
+
+	seed(t, agent, "a/b", map[string]any{"frontmatter": obj("generated", "yes")})
+	by, at := generated(t, agent, "a/b")
+	stamp, err := time.Parse(time.RFC3339, at)
+	if by != "support-agent/1.4" || err != nil || stamp.Before(before) || !strings.HasSuffix(at, "Z") {
+		t.Fatalf("create: by %q at %q (%v)", by, at, err)
+	}
+
+	if _, err := human.Update(ctx, "a/b", nil, map[string]any{"body": "edited"}); err != nil {
+		t.Fatal(err)
+	}
+	if by, _ := generated(t, human, "a/b"); by != "human:ann" {
+		t.Fatalf("update: by %q", by)
+	}
+
+	_, edited := generated(t, human, "a/b")
+	seed(t, agent, "a/c", map[string]any{})
+	if _, err := agent.Relate(ctx, "a/b", "a/c"); err != nil {
+		t.Fatal(err)
+	}
+	if by, at := generated(t, agent, "a/b"); by != "human:ann" || at != edited {
+		t.Fatalf("relate: by %q at %q", by, at)
+	}
+}
+
+func TestAStampLeavesTheCallersFrontmatterAsItWas(t *testing.T) {
+	fm := obj("k", 1)
+	seed(t, newTools(t), "a/b", map[string]any{"frontmatter": fm})
+	if _, ok := fm.Get("generated"); ok || fm.Len() != 1 {
+		t.Fatalf("frontmatter = %v", fm.Keys())
+	}
+}
+
+func TestAnUpdateThatChangesNothingWritesNothing(t *testing.T) {
+	cs, tenant := conceptStore(t), uuid.New()
+	ann, bob := NewTools(cs, tenant, "human:ann"), NewTools(cs, tenant, "human:bob")
+	seed(t, ann, "a/b", map[string]any{"body": "same", "frontmatter": obj("k", 1)})
+	before, err := ann.Read(ctx, "a/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, at := generated(t, ann, "a/b")
+	stale := before.Version - 1
+	result, err := bob.Update(ctx, "a/b", &stale, map[string]any{"body": "same", "frontmatter": obj("k", 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (writeResult{"a/b", before.Version}); result != want {
+		t.Fatalf("got %+v, want %+v", result, want)
+	}
+	if by, now := generated(t, bob, "a/b"); by != "human:ann" || now != at {
+		t.Fatalf("restamped: by %q at %q", by, now)
+	}
+	if _, _, history, err := cs.Detail(ctx, tenant, "a/b", 10); err != nil || len(history) != 1 {
+		t.Fatalf("history %d, %v", len(history), err)
 	}
 }
 
@@ -670,9 +751,11 @@ func TestTextContentIsPythonJSONDumps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	at := field(field(field(res.StructuredContent, "frontmatter"), "generated"), "at")
 	want := `{"path": "a/b", "type": "Concept", "title": "", "description": "", "body": "caf\u00e9 \"<&>\"\n", ` +
-		fmt.Sprintf(`"frontmatter": {"n": 1}, "version": %v, "links": [], "backlinks": [], `+
-			`"status": "stable", "stale": false, "trust": "unverified", "generated_at": ""}`, field(created.StructuredContent, "version"))
+		fmt.Sprintf(`"frontmatter": {"n": 1, "generated": {"at": %q, "by": "mcp"}}, "version": %v, "links": [], "backlinks": [], `+
+			`"status": "stable", "stale": false, "trust": "unverified", "generated_at": %q}`,
+			at, field(created.StructuredContent, "version"), at)
 	if got := text(t, res); got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}

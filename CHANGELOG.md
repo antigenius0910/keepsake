@@ -14,6 +14,20 @@ chart and an SBOM, and tags `vX.Y.Z`. See CONTRIBUTING.md.
 - `okf_search` cards and `okf_read` results carry `status`, `stale`, `trust`
   and `generated_at`, derived from OKF v0.2 §5 frontmatter. A bare `verified`
   mapping counts as one verification. Ranking is unchanged.
+- Every `okf_create` and `okf_update` stamps OKF `generated: { by, at }`
+  with the writer and the time. It replaces any `generated` the caller sent.
+  `okf_relate` keeps the existing stamp, since adding a link is not authorship.
+  An `okf_update` that changes nothing writes nothing, keeps the stamp and
+  returns the current version, even when `expected_version` is stale.
+  Imports are never stamped, so an imported bundle still exports byte-for-byte.
+
+### Changed
+
+- Writers are recorded in the OKF actor convention. Auth mode none records
+  `keepsake/<version>`, not `mcp`. `keepsake import` and a bundle upload in
+  mode none record `process:import`, not `cli`.
+- `keepsake token` refuses a `--sub` that is not an OKF actor:
+  `<producer>/<version>`, `human:<id>` or `process:<id>`.
 
 ## 0.4.0 — 2026-09-29
 
