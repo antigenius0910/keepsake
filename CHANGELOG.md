@@ -23,6 +23,10 @@ chart and an SBOM, and tags `vX.Y.Z`. See CONTRIBUTING.md.
 
 ### Changed
 
+- **Breaking.** The MCP tools drop the `okf_` prefix: `search`, `read`, `list`,
+  `grep`, `create`, `update` and `relate`. Claude Code shows them as
+  `mcp__keepsake__search`. A client that allows or denies tools by name MUST
+  update its lists. OKF stays the storage and bundle format.
 - `keepsake migrate` no longer needs `CREATE` on the database when the schema
   already exists and the owner role owns it. It refuses a schema it does not own.
   The deploy docs now pre-create the schema instead of granting `CREATE`.
