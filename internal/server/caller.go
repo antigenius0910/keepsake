@@ -30,12 +30,18 @@ type caller struct {
 	actor  string
 	// upload lets the caller replace a prefix through /bundle, which deletes concepts.
 	upload bool
+	// readOnly refuses every write: create, update, relate and /bundle.
+	readOnly bool
 	// anonymous is auth mode none, where actor names this server, not the caller.
 	anonymous bool
 }
 
 // uploadScope is the token scope /bundle requires, so a token handed to an agent cannot delete concepts in bulk.
 const uploadScope = "bundle"
+
+// readScope makes a token read-only, so an agent holding it cannot change what later reads see.
+// It is a restriction, not a grant: a token without it keeps every write it had.
+const readScope = "read"
 
 type callerKey struct{}
 
@@ -48,7 +54,9 @@ func withCaller(next http.Handler, c caller) http.Handler {
 // FixedTenant serves every request as tenant, for auth mode none.
 func FixedTenant(tenant uuid.UUID) func(http.Handler) http.Handler {
 	// Mode none already trusts every client that reaches it, so it keeps /bundle.
-	return func(next http.Handler) http.Handler { return withCaller(next, caller{tenant, actor, true, true}) }
+	return func(next http.Handler) http.Handler {
+		return withCaller(next, caller{tenant: tenant, actor: actor, upload: true, anonymous: true})
+	}
 }
 
 // JWT verifies HS256 tokens from one trusted issuer. Secrets[0] signs; every secret verifies, for rotation.
@@ -173,7 +181,9 @@ func (j *JWT) verify(token string) (caller, error) {
 	}
 	var scope string
 	json.Unmarshal(c.Scope, &scope)
-	return caller{tenant, c.Sub, slices.Contains(strings.Fields(scope), uploadScope), false}, nil
+	scopes := strings.Fields(scope)
+	return caller{tenant: tenant, actor: c.Sub, upload: slices.Contains(scopes, uploadScope),
+		readOnly: slices.Contains(scopes, readScope)}, nil
 }
 
 // Middleware binds the verified caller, or answers 401 for a bad token and 403 for a token naming no tenant.

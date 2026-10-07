@@ -78,6 +78,9 @@ The chart configures no backups. You MUST set up one of these:
   tenant. Keep the Service `ClusterIP`.
 - In `jwt` mode, see [Tenancy and authority](../README.md#tenancy-and-authority).
   The signing secret MUST NOT be readable by anything an LLM drives.
+- A token carrying the `read` scope can only read: `create`, `update`,
+  `relate` and `PUT /bundle` refuse it, even alongside `bundle`. A refused
+  tool call counts as `tool_error`. `keepsake token --scope read` mints one.
 - The console shares the port with `/mcp` and has its own password in
   `<release>-admin`. A GitOps install MUST set `admin.existingSecret`, or the
   password changes on every sync.

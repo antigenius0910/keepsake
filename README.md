@@ -153,6 +153,10 @@ keepsake records `sub` as the writer, and stamps it as OKF `generated.by` on eve
 concept the token writes through `/mcp`. It MUST be an OKF §7 actor: `<producer>/<version>`
 for an agent, `human:<id>` for a person or `process:<id>` for a process.
 `keepsake token` refuses anything else.
+A token whose space-separated `scope` claim includes `read`, such as
+`"scope": "read"`, is read-only: `create`, `update`, `relate` and `PUT /bundle`
+refuse it. A token without `read` keeps every write. An orchestrator SHOULD
+mint `read` tokens for agents that only consult keepsake.
 The secret MUST NOT be readable by anything an LLM drives.
 
 The server refuses to start if it is connected as a superuser or as the schema

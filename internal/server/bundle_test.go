@@ -395,6 +395,23 @@ func TestAnAgentTokenCannotUpload(t *testing.T) {
 	}
 }
 
+func TestAReadScopedTokenCannotUploadEvenWithTheBundleScope(t *testing.T) {
+	cs, tenant := conceptStore(t), uuid.New()
+	if _, err := cs.ImportMany(ctx, tenant, []okf.Concept{{Path: "docs/old", Type: "Doc"}}, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/bundle?prefix=docs", tarball(t, entry{name: "a.md", body: md("Doc", "a")}))
+	req.Header.Set("Authorization", "Bearer "+issuer.Mint(tenant, "process:ingest", time.Minute, uploadScope, readScope))
+	rec := httptest.NewRecorder()
+	issuer.Middleware(replaceBundle(cs)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "read scope") {
+		t.Fatalf("PUT = %d %s, want 403", rec.Code, rec.Body)
+	}
+	if p := listPaths(t, cs, tenant); !reflect.DeepEqual(p, []string{"docs/old"}) {
+		t.Fatalf("paths = %v", p)
+	}
+}
+
 func TestADeclaredOversizedUploadIsRefusedWithoutTakingTheSlot(t *testing.T) {
 	defer func(n int64) { maxUpload = n }(maxUpload)
 	maxUpload = 16

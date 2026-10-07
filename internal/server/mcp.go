@@ -80,6 +80,9 @@ var handlers = map[string]handler{
 	},
 }
 
+// writes are the tools a read-scoped token is refused.
+var writes = map[string]bool{"create": true, "update": true, "relate": true}
+
 // toolList is tools/list without the cacheScope and ttlMs go-sdk's ListToolsResult always sends.
 type toolList struct {
 	mcp.ResultBase
@@ -171,7 +174,8 @@ func acquire(ctx context.Context, slot chan struct{}) (release func(), ok bool) 
 func toolHandler(t *Tools, name string, schema *jsonschema.Schema, call handler, slot chan struct{}) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tools := t
-		if c, ok := ctx.Value(callerKey{}).(caller); ok {
+		c, bound := ctx.Value(callerKey{}).(caller)
+		if bound {
 			scoped := *t
 			scoped.t, scoped.actor = c.tenant, c.actor
 			tools = &scoped
@@ -185,6 +189,11 @@ func toolHandler(t *Tools, name string, schema *jsonschema.Schema, call handler,
 			slog.Info("tool call", "tool", name, "outcome", outcome, "duration_ms", elapsed.Milliseconds(),
 				"tenant", tools.t, "actor", tools.actor)
 		}()
+		// Before the arguments are even parsed: nothing a read-only caller sends can write.
+		if bound && c.readOnly && writes[name] {
+			outcome = "tool_error"
+			return failed(name + ": this token is read-only (it carries the " + readScope + " scope)"), nil
+		}
 		raw := req.Params.Arguments
 		if len(raw) == 0 || string(raw) == "null" {
 			raw = json.RawMessage("{}")

@@ -9,6 +9,13 @@ chart and an SBOM, and tags `vX.Y.Z`. See CONTRIBUTING.md.
 
 ## Unreleased
 
+### Added
+
+- The `read` token scope makes a jwt-mode token read-only. `create`, `update`,
+  `relate` and `PUT /bundle` refuse it with a tool error or a 403, even when it
+  also carries `bundle`. Tokens without it are unchanged, so existing tokens keep
+  every write. Mint one with `keepsake token --scope read`.
+
 ### Changed
 
 - Migration 0007 shrinks the `posting` table and cuts how much an edit bloats it.
