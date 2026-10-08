@@ -1,4 +1,4 @@
 package server
 
 // Version is this release. scripts/release.sh sets it to Chart.yaml's appVersion.
-const Version = "0.5.0"
+const Version = "0.6.0"

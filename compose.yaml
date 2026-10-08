@@ -17,7 +17,7 @@ services:
       retries: 30
 
   migrate:
-    image: ghcr.io/roee-fs/keepsake:0.5.0
+    image: ghcr.io/roee-fs/keepsake:0.6.0
     build: .
     command: ["keepsake", "migrate"]
     environment:
@@ -27,7 +27,7 @@ services:
         condition: service_healthy
 
   keepsake:
-    image: ghcr.io/roee-fs/keepsake:0.5.0
+    image: ghcr.io/roee-fs/keepsake:0.6.0
     build: .
     environment:
       # The app role. The server refuses to start as the owner or a superuser.
