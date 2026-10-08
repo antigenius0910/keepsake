@@ -526,5 +526,7 @@ options:
                    to 1h.
   --scope SCOPE    Space-separated scopes. "bundle" lets the token replace
                    a prefix through PUT /bundle. MUST NOT be given to an agent.
+                   "read" makes the token read-only: create, update, relate
+                   and PUT /bundle are refused.
 `,
 }

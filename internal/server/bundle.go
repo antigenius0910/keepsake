@@ -147,6 +147,11 @@ func replaceBundle(cs *store.ConceptStore) http.HandlerFunc {
 			internalError(w, r, errors.New("no caller bound to /bundle"))
 			return
 		}
+		if c.readOnly {
+			slog.Warn("refused /bundle request", "reason", "token carries the "+readScope+" scope", "actor", c.actor)
+			writeJSON(w, r, http.StatusForbidden, detail{"this token cannot upload: the " + readScope + " scope refuses it, even with the " + uploadScope + " scope"})
+			return
+		}
 		if !c.upload {
 			slog.Warn("refused /bundle request", "reason", "token lacks the "+uploadScope+" scope", "actor", c.actor)
 			writeJSON(w, r, http.StatusForbidden, detail{"this token cannot upload: it needs the " + uploadScope + " scope"})

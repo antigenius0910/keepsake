@@ -245,10 +245,10 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // asTenant connects to one shared server as tenant, the way a platform run would.
-func asTenant(t *testing.T, url string, tenant uuid.UUID, sub string) *mcp.ClientSession {
+func asTenant(t *testing.T, url string, tenant uuid.UUID, sub string, scopes ...string) *mcp.ClientSession {
 	t.Helper()
 	client := mcp.NewClient(&mcp.Implementation{Name: "keepsake-test"}, nil)
-	transport := &mcp.StreamableClientTransport{Endpoint: url, HTTPClient: &http.Client{Transport: bearer(issuer.Mint(tenant, sub, time.Minute))}}
+	transport := &mcp.StreamableClientTransport{Endpoint: url, HTTPClient: &http.Client{Transport: bearer(issuer.Mint(tenant, sub, time.Minute, scopes...))}}
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -299,6 +299,35 @@ func TestOneServerKeepsConcurrentTenantsApart(t *testing.T) {
 		if err != nil || len(revs) != 1 || revs[0].UpdatedBy != fmt.Sprintf("run:%d", i) {
 			t.Fatalf("tenant %d revisions %+v, %v", i, revs, err)
 		}
+	}
+}
+
+func TestAReadScopedTokenReadsButCannotWrite(t *testing.T) {
+	cs, tenant := conceptStore(t), uuid.New()
+	srv := httptest.NewServer(issuer.Middleware(NewMCPHandler(NewTools(cs, uuid.Nil, actor))))
+	t.Cleanup(srv.Close)
+	text := func(res *mcp.CallToolResult) string { return res.Content[0].(*mcp.TextContent).Text }
+	// A token without the scope keeps every write it had.
+	writer := asTenant(t, srv.URL, tenant, "run:writer")
+	if res, err := writer.CallTool(ctx, &mcp.CallToolParams{Name: "create", Arguments: map[string]any{"path": "notes/a", "type": "Concept", "body": "kept"}}); err != nil || res.IsError {
+		t.Fatalf("a token without the read scope could not create: %v %+v", err, res)
+	}
+	reader := asTenant(t, srv.URL, tenant, "run:reader", readScope)
+	if res, err := reader.CallTool(ctx, &mcp.CallToolParams{Name: "read", Arguments: map[string]any{"path": "notes/a"}}); err != nil || res.IsError || !strings.Contains(text(res), "kept") {
+		t.Fatalf("read = %v %+v", err, res)
+	}
+	for _, p := range []mcp.CallToolParams{
+		{Name: "create", Arguments: map[string]any{"path": "notes/b", "type": "Concept", "body": "new"}},
+		{Name: "update", Arguments: map[string]any{"path": "notes/a", "body": "overwritten"}},
+		{Name: "relate", Arguments: map[string]any{"from_path": "notes/a", "to_path": "notes/a"}},
+	} {
+		if res, err := reader.CallTool(ctx, &p); err != nil || !res.IsError || !strings.Contains(text(res), "read-only") {
+			t.Errorf("%s = %v %+v, want a read-only refusal", p.Name, err, res)
+		}
+	}
+	revs, err := cs.Activity(ctx, &tenant, 10)
+	if err != nil || len(revs) != 1 || revs[0].UpdatedBy != "run:writer" {
+		t.Fatalf("revisions %+v, %v: the read-scoped token wrote", revs, err)
 	}
 }
 
