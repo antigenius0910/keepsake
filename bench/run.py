@@ -285,6 +285,25 @@ def wait_ready(url: str, server: subprocess.Popen[bytes]) -> None:
     raise TimeoutError(f"{url} never became ready")
 
 
+def sandbox(memory: Path) -> dict[str, Any]:
+    """Bash settings that read only the memory, write nothing and reach no network.
+    The home and temp directories hold the answer keys and other trials' memories."""
+    return {
+        "sandbox": {
+            "enabled": True,
+            "failIfUnavailable": True,
+            "allowUnsandboxedCommands": False,
+            "filesystem": {
+                # Absolute, since the agent's HOME is its trial directory, not the operator's.
+                "denyRead": [str(Path.home().resolve()), str(Path(tempfile.gettempdir()).resolve())],
+                # The trial's HOME is memory's parent; its .claude holds tool output too long to show.
+                "allowRead": [str(memory.resolve()), str((memory.parent / ".claude").resolve())],
+            },
+            "network": {"allowedDomains": [], "strictAllowlist": True},
+        }
+    }
+
+
 def rubric_score(reply: str) -> float:
     """The score in a rubric judge's JSON reply, or 0 when it gave none."""
     m = re.search(r'"score"\s*:\s*"?([0-9.]+)', reply)
@@ -304,11 +323,11 @@ def judged(
         ]
         return sum(scores) / len(scores)
     if "judge_template" in expect:
-        # LongMemEval's own prompt and parsing: the verdict is any "yes" in the reply.
+        # LongMemEval's parsing passes any "yes" in the reply; a task MAY name its own pattern.
         reply = judge(
             model, expect["judge_template"].replace(grade.RESPONSE, answer), cwd
         )
-        return "yes" in reply.lower()
+        return re.search(expect.get("judge_pass", "yes"), reply, re.IGNORECASE) is not None
     if "judge" in expect:
         prompt = (
             "Grade an answer against a rubric. Reply with exactly PASS or FAIL.\n\n"
@@ -381,12 +400,15 @@ def trial(
         proxy = None
         try:
             isolated, cwd, allowed = list(ISOLATED), work, ["mcp__keepsake"]
-            if variant.get("files"):
-                allowed += grade.FILE_TOOLS
+            if files := variant.get("files"):
+                files = files if isinstance(files, list) else ["Read", "Grep", "Glob"]
+                allowed += files
                 # A snapshot taken before the agent starts, so its own writes do not show up in it.
                 cwd = work / grade.MEMORY_DIR
                 sh(str(binary), "export", "--dsn", app, "--tenant", tenant, str(cwd))
-                isolated[isolated.index("--tools") + 1] = ",".join(grade.FILE_TOOLS)
+                isolated[isolated.index("--tools") + 1] = ",".join(files)
+                if "Bash" in files:
+                    isolated += ["--settings", json.dumps(sandbox(cwd))]
             proxy = Proxy(f"http://127.0.0.1:{port}/mcp", variant)
             config = work / "mcp.json"
             config.write_text(
@@ -451,7 +473,7 @@ def trial(
                 exported = work / "export"
                 sh(str(binary), "export", "--dsn", app, "--tenant", tenant, str(exported))
                 after = grade.load_bundle(exported)
-                # Kept, so a memory an agent wrote can seed a later task (bench/longmemeval.py --curated).
+                # Kept, so a memory an agent wrote can seed a later task (bench/datasets/longmemeval.py --curated).
                 kept = out / "exports" / f"{variant['name']}.{task['id']}.{n}"
                 shutil.copytree(exported, kept)
                 row["export"] = str(kept)
@@ -514,7 +536,7 @@ def main() -> None:
         "--tasks-file",
         type=Path,
         default=BENCH / "tasks.json",
-        help="Default: bench/tasks.json. bench/longmemeval.py writes others.",
+        help="Default: bench/tasks.json. bench/datasets/longmemeval.py writes others.",
     )
     p.add_argument(
         "--tasks", nargs="*", help="Task ids in the tasks file. Default: all."

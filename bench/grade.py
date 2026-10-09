@@ -18,8 +18,8 @@ from statistics import mean
 from typing import Any
 
 TOOL_PREFIX = "mcp__keepsake__"
-# The files variant's built-in tools, named as the keepsake tools they stand in for.
-FILE_TOOLS = {"Read": "read", "Grep": "grep", "Glob": "list"}
+# The file variants' built-in tools, named as the keepsake tools they stand in for.
+FILE_TOOLS = {"Read": "read", "Grep": "grep", "Glob": "list", "Bash": "bash"}
 # The directory run.py exports a files trial's memory into.
 MEMORY_DIR = "memory"
 # Where a task's judge_template takes the agent's answer.
@@ -139,6 +139,13 @@ def grade(
         concept_path(c["input"].get("path", ""))
         for c in calls
         if c["tool"] == "read"
+    }
+    # A shell reads by naming the file, as in `cat runbooks/db-failover.md`.
+    read |= {
+        concept_path(p.removeprefix("./"))
+        for c in calls
+        if c["tool"] == "bash"
+        for p in re.findall(r"[\w./-]+\.md", c["input"].get("command", ""))
     }
     for path in expect.get("reads", []) if require_tools else []:
         checks[f"read {path}"] = path in read
