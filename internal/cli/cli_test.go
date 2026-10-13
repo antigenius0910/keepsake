@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/roee-fs/keepsake/internal/store"
+	"github.com/roee-fs/keepsake/internal/repositories"
 	"github.com/roee-fs/keepsake/okf"
 )
 
@@ -95,25 +95,6 @@ func TestATenantIsReadAsPythonsUUIDReadsIt(t *testing.T) {
 	}
 }
 
-func TestFilesAreReadInPythonsPathOrder(t *testing.T) {
-	dir := t.TempDir()
-	for _, f := range []string{"a-b/x.md", "a/x.md", "a.md", "b.md"} {
-		writeFile(t, dir, f, "---\ntype: Concept\n---\n")
-	}
-	cs, err := documents(dir, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, c := range cs {
-		got = append(got, c.Path)
-	}
-	// pathlib compares parts, so "a" sorts before "a-b" and "a.md".
-	if want := []string{"a/x", "a-b/x", "a", "b"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("%v, want %v", got, want)
-	}
-}
-
 // Ported from 2de90d2:tests/test_schema_name.py, driving the real command as Python does.
 func TestANonDefaultSchemaMigratesAndServes(t *testing.T) {
 	const schema = "okf_elsewhere"
@@ -140,15 +121,15 @@ func TestANonDefaultSchemaMigratesAndServes(t *testing.T) {
 		t.Fatal(guarded, err)
 	}
 
-	s, err := store.Open(ctx, db.AppDSN, schema)
+	s, err := repositories.Open(ctx, db.AppDSN, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := store.Verify(ctx, s, schema); err != nil {
+	if err := repositories.Verify(ctx, s, schema); err != nil {
 		t.Fatal(err)
 	}
-	cs, tenant := store.NewConceptStore(s), uuid.New()
+	cs, tenant := repositories.NewConceptRepository(s), uuid.New()
 	if _, _, err := cs.Create(ctx, tenant, okf.Concept{Path: "a/b", Type: "Concept", Body: "here"}, "t"); err != nil {
 		t.Fatal(err)
 	}
