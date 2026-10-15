@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -101,7 +102,7 @@ func readWithBacklinks(ctx context.Context, tx pgx.Tx, path string) (*okf.Concep
 
 // ReadWithBacklinks returns the concept and the paths linking to it. nil means no such path.
 func (cs *ConceptRepository) ReadWithBacklinks(ctx context.Context, tenant uuid.UUID, path string) (c *okf.Concept, backlinks []string, err error) {
-	err = cs.s.Scope(ctx, tenant, func(tx pgx.Tx) error {
+	err = cs.read(ctx, tenant, func(tx pgx.Tx) error {
 		c, backlinks, err = readWithBacklinks(ctx, tx, path)
 		return err
 	})
@@ -159,7 +160,7 @@ func (cs *ConceptRepository) Revisions(ctx context.Context, tenant uuid.UUID, li
 // List returns (path, type) for every concept under prefix. An empty prefix is all.
 func (cs *ConceptRepository) List(ctx context.Context, tenant uuid.UUID, prefix string) ([]models.PathType, error) {
 	var out []models.PathType
-	err := cs.s.Scope(ctx, tenant, func(tx pgx.Tx) (err error) {
+	err := cs.read(ctx, tenant, func(tx pgx.Tx) (err error) {
 		out, err = collect[models.PathType](ctx, tx,
 			"SELECT path, type FROM concept WHERE starts_with(path, $1) ORDER BY path", prefix)
 		return err
@@ -236,25 +237,62 @@ func (cs *ConceptRepository) Activity(ctx context.Context, tenant *uuid.UUID, li
 	return out, err
 }
 
-// DailyWrites returns revision counts for the last days days, oldest first and zero-filled.
-func (cs *ConceptRepository) DailyWrites(ctx context.Context, tenant *uuid.UUID, days int) ([]models.DailyWrite, error) {
-	if days <= 0 {
+// timeseriesSQL counts writes and reads per UTC bucket, oldest first and zero-filled. $1 is a
+// date_trunc unit and $2 the bucket count. Each table is scanned once, from the first bucket on.
+const timeseriesSQL = `
+WITH b AS (
+  SELECT generate_series(date_trunc($1, now() AT TIME ZONE 'UTC') - ($2::int - 1) * ('1 ' || $1)::interval,
+                         date_trunc($1, now() AT TIME ZONE 'UTC'), ('1 ' || $1)::interval) AS start
+), w AS (
+  SELECT date_trunc($1, created_at AT TIME ZONE 'UTC') AS start, count(*) AS n FROM concept_revision
+  WHERE created_at >= (SELECT min(start) FROM b) AT TIME ZONE 'UTC' GROUP BY 1
+), r AS (
+  SELECT date_trunc($1, created_at AT TIME ZONE 'UTC') AS start, count(*) AS n FROM concept_read
+  WHERE created_at >= (SELECT min(start) FROM b) AT TIME ZONE 'UTC' GROUP BY 1
+)
+SELECT b.start AT TIME ZONE 'UTC', coalesce(w.n, 0), coalesce(r.n, 0)
+FROM b LEFT JOIN w USING (start) LEFT JOIN r USING (start) ORDER BY b.start`
+
+// Timeseries returns write and read counts for the last n buckets of unit: hour, day or week.
+func (cs *ConceptRepository) Timeseries(ctx context.Context, tenant *uuid.UUID, unit string, n int) ([]models.Bucket, error) {
+	if n <= 0 {
 		return nil, nil
 	}
-	var out []models.DailyWrite
+	var out []models.Bucket
 	err := cs.connect(ctx, tenant, func(tx pgx.Tx) (err error) {
-		// The lower bound repeats the series start so the created_at index can serve the join.
-		out, err = collect[models.DailyWrite](ctx, tx,
-			"SELECT d::date, count(r.created_at) FROM generate_series("+
-				"  (current_date - ($1::int - 1))::timestamp, current_date::timestamp,"+
-				"  interval '1 day'"+
-				") AS d "+
-				"LEFT JOIN concept_revision r ON r.created_at::date = d::date"+
-				"  AND r.created_at >= (current_date - ($1::int - 1))::timestamp "+
-				"GROUP BY d ORDER BY d", days)
+		out, err = collect[models.Bucket](ctx, tx, timeseriesSQL, unit, n)
 		return err
 	})
 	return out, err
+}
+
+// WithReadLog returns a copy whose agent reads each log a row for the console's reads chart.
+func (cs *ConceptRepository) WithReadLog() *ConceptRepository {
+	logged := *cs
+	logged.logReads = true
+	return &logged
+}
+
+// read runs fn in tenant's scope and, from WithReadLog, logs the read in the same transaction.
+// The log goes in one round trip under a savepoint, so a failed insert costs a chart point, not the read.
+// Its commit does not wait for the WAL flush: a crash may lose the last few reads' rows, never a concept.
+func (cs *ConceptRepository) read(ctx context.Context, tenant uuid.UUID, fn func(pgx.Tx) error) error {
+	return cs.s.Scope(ctx, tenant, func(tx pgx.Tx) error {
+		if err := fn(tx); err != nil || !cs.logReads {
+			return err
+		}
+		b := &pgx.Batch{}
+		b.Queue("SAVEPOINT read_log")
+		b.Queue("SELECT set_config('synchronous_commit', 'off', true)")
+		b.Queue("INSERT INTO concept_read (tenant_id) VALUES ($1)", tenant)
+		b.Queue("RELEASE SAVEPOINT read_log")
+		if err := tx.SendBatch(ctx, b).Close(); err != nil {
+			slog.Warn("read not logged", "tenant", tenant, "err", err)
+			_, err = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT read_log")
+			return err
+		}
+		return nil
+	})
 }
 
 // Tenants lists every tenant with concepts, and how many; there is no other tenant registry.
@@ -324,7 +362,7 @@ func (cs *ConceptRepository) Search(ctx context.Context, tenant uuid.UUID, query
 		return nil, nil
 	}
 	var out []models.Hit
-	err := cs.s.Scope(ctx, tenant, func(tx pgx.Tx) (err error) {
+	err := cs.read(ctx, tenant, func(tx pgx.Tx) (err error) {
 		out, err = collect[models.Hit](ctx, tx, searchSQL, terms, prefix, limit, tenant)
 		return err
 	})
@@ -405,7 +443,7 @@ func (cs *ConceptRepository) Grep(ctx context.Context, tenant uuid.UUID, pattern
 		return nil, nil
 	}
 	var out []models.GrepHit
-	err := cs.s.Scope(ctx, tenant, func(tx pgx.Tx) (err error) {
+	err := cs.read(ctx, tenant, func(tx pgx.Tx) (err error) {
 		// SET LOCAL takes no parameter; the value is an int literal in this file.
 		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", grepTimeoutMS)); err != nil {
 			return err

@@ -42,7 +42,8 @@ type ConceptService struct {
 }
 
 func NewConceptService(cs *repositories.ConceptRepository, tenant uuid.UUID, actor string) *ConceptService {
-	return &ConceptService{c: cs, t: tenant, actor: actor}
+	// The agent's reads are what the console's reads chart counts.
+	return &ConceptService{c: cs.WithReadLog(), t: tenant, actor: actor}
 }
 
 // As returns a copy acting for tenant as actor.
