@@ -469,6 +469,41 @@ func TestRetypingToAnAttestedComputationChecksItsContract(t *testing.T) {
 	wantToolError(t, err, "runtime is required")
 }
 
+func TestABodyEditMustKeepTheComputation(t *testing.T) {
+	tools := newTools(t)
+	seed(t, tools, "a/b", map[string]any{"type": okf.AttestedComputation, "frontmatter": obj("runtime", "bigquery"),
+		"body": "# Computation\n\n```sql\nSELECT 1\n```\n"})
+	_, err := tools.Update(ctx, "a/b", nil, map[string]any{"body": "# Computation\n\nGone.\n"})
+	wantToolError(t, err, "exactly one code block under # Computation")
+}
+
+func TestABodyEditBesideAComputationFileIsChecked(t *testing.T) {
+	tools := newTools(t)
+	fm := obj("runtime", "bigquery", "computation", "lib/x.sql")
+	old := okf.Concept{Path: "a/b", Type: okf.AttestedComputation, Body: "# Computation\n\n```sql\nSELECT 1\n```\n", Frontmatter: fm}
+	if _, _, err := tools.c.Create(ctx, tools.t, old, "process:import"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := tools.Update(ctx, "a/b", nil, map[string]any{"body": old.Body + "\n```sql\nSELECT 2\n```\n"})
+	wantToolError(t, err, "computation names a file")
+}
+
+// A CRLF body predates write normalization, so it MUST NOT read as a body edit.
+func TestAStoredConceptWithoutAComputationTakesOtherEdits(t *testing.T) {
+	tools := newTools(t)
+	old := okf.Concept{Path: "a/b", Type: okf.AttestedComputation, Body: "Revenue.\r\nMore.\r\n", Frontmatter: obj("runtime", "bigquery")}
+	if _, _, err := tools.c.Create(ctx, tools.t, old, "process:import"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tools.Update(ctx, "a/b", nil, map[string]any{"title": "Revenue"}); err != nil {
+		t.Fatal(err)
+	}
+	seed(t, tools, "a/c", map[string]any{})
+	if _, err := tools.Relate(ctx, "a/b", "a/c"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadOfAMissingPathIsNil(t *testing.T) {
 	c, err := newTools(t).Read(ctx, "nothing/here", ReadOptions{})
 	if err != nil || c != nil {

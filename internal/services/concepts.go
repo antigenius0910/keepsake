@@ -203,15 +203,18 @@ func (t *ConceptService) concept(existing *okf.Concept, path string, kw map[stri
 	return c, nil
 }
 
-// familyErrors returns the OKF §5 and §10 rules broken by the keys a write changes.
+// familyErrors returns the OKF §5 and §10 rules broken by the keys a write changes, or whose verdict it changes.
 // A stored concept from an older bundle can break a rule on a key nobody touched, and that MUST NOT block the write.
-// A retype into an Attested Computation also checks the contract it now owes.
+// A retype or a body edit changes a verdict without touching its key, so it is checked too.
 func familyErrors(existing *okf.Concept, c okf.Concept) []string {
 	problems := okf.Families(c)
-	retyped := existing != nil && existing.Type != c.Type
+	var before map[string][]string
+	if existing != nil {
+		before = okf.Families(*existing)
+	}
 	var errs []string
 	for _, k := range slices.Sorted(maps.Keys(problems)) {
-		owed := retyped && slices.Contains(okf.ContractFields, k)
+		owed := existing != nil && !slices.Equal(before[k], problems[k])
 		// generated is the server's own stamp, not the caller's.
 		if k != "generated" && (owed || changed(existing, c, k)) {
 			errs = append(errs, problems[k]...)

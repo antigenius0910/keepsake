@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +28,9 @@ import (
 )
 
 const unavailable = "the knowledge store is temporarily unavailable; try again shortly"
+
+// errInternal is all a client learns of a defect. The detail goes to the log, since driver errors name roles and hosts.
+var errInternal = errors.New("internal error")
 
 type handler func(ctx context.Context, t *services.ConceptService, args map[string]any) (any, error)
 
@@ -186,20 +191,25 @@ func acquire(ctx context.Context, slot chan struct{}) (release func(), ok bool) 
 }
 
 func toolHandler(t *services.ConceptService, name string, schema *jsonschema.Schema, call handler, slot chan struct{}) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (res *mcp.CallToolResult, err error) {
 		tools := t
 		c, bound := ctx.Value(callerKey{}).(caller)
 		if bound {
 			tools = t.As(c.tenant, c.actor)
 		}
+		l := slog.With("tool", name, "tenant", tools.Tenant(), "actor", tools.Actor())
 		start, outcome := time.Now(), "error"
 		defer func() {
+			// The SDK runs handlers on its own goroutines, where net/http's recovery does not reach.
+			if p := recover(); p != nil {
+				l.Error("tool call panicked", "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+				outcome, res, err = "error", nil, errInternal
+			}
 			elapsed := time.Since(start)
 			toolCalls.WithLabelValues(name, outcome).Inc()
 			toolDuration.WithLabelValues(name).Observe(elapsed.Seconds())
 			// The arguments MUST NOT be logged: they carry concept bodies.
-			slog.Info("tool call", "tool", name, "outcome", outcome, "duration_ms", elapsed.Milliseconds(),
-				"tenant", tools.Tenant(), "actor", tools.Actor())
+			l.Info("tool call", "outcome", outcome, "duration_ms", elapsed.Milliseconds())
 		}()
 		// Before the arguments are even parsed: nothing a read-only caller sends can write.
 		if bound && c.readOnly && writes[name] {
@@ -213,6 +223,7 @@ func toolHandler(t *services.ConceptService, name string, schema *jsonschema.Sch
 		// An okf.Map keeps frontmatter key order and exact numbers.
 		m := okf.NewMap()
 		if err := json.Unmarshal(raw, m); err != nil {
+			l.Warn("tool call arguments unreadable", "err", err)
 			return nil, err
 		}
 		// Enforced before dispatch, so a wrong shape is something the agent can correct.
@@ -226,6 +237,7 @@ func toolHandler(t *services.ConceptService, name string, schema *jsonschema.Sch
 		}
 		// Fail closed: the nil tenant is never a caller's, and writing as it would pool every stray write.
 		if tools.Tenant() == uuid.Nil {
+			l.Error("tool call without a tenant")
 			return nil, errors.New("no tenant bound to this request")
 		}
 		release, ok := acquire(ctx, slot)
@@ -241,22 +253,23 @@ func toolHandler(t *services.ConceptService, name string, schema *jsonschema.Sch
 			return failed(te.Msg), nil
 		case errors.Is(err, models.ErrUnavailable):
 			outcome = "unavailable"
-			slog.Warn("database unavailable", "tool", name, "err", err)
+			l.Warn("database unavailable", "err", err)
 			return failed(unavailable), nil
 		case err != nil:
-			// A defect here, not the agent's mistake: it stays a protocol error.
-			slog.Error("tool call failed", "tool", name, "err", err)
-			return nil, err
+			// A defect here, not the agent's mistake: it stays a protocol error, without the detail.
+			l.Error("tool call failed", "err", err)
+			return nil, errInternal
 		}
 		text, err := okf.PyDumps(result)
 		if err != nil {
-			return nil, err
+			l.Error("tool call failed", "err", err)
+			return nil, errInternal
 		}
 		outcome = "ok"
 		if _, ok := result.(services.ConflictResult); ok {
 			outcome = "conflict"
 		}
-		res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+		res = &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 		if result != nil {
 			res.StructuredContent = result
 		}

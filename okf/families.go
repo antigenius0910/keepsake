@@ -12,9 +12,6 @@ import (
 // AttestedComputation is the OKF §10 type whose contract Families checks.
 const AttestedComputation = "Attested Computation"
 
-// ContractFields are the frontmatter keys of an Attested Computation's §10.2 contract.
-var ContractFields = []string{"computation", "runtime", "parameters", "executor", "attester"}
-
 var actor = regexp.MustCompile(`^([^\s/:]+/[^\s/]+|(human|process):\S+)$`)
 
 // IsActor reports whether s is an OKF §7 actor: <producer>/<version>, human:<id> or process:<id>.
@@ -61,18 +58,25 @@ func Families(c Concept) map[string][]string {
 		add("usage_window", window(v, "usage_window")...)
 	}
 	if c.Type == AttestedComputation {
-		contract(fm, add)
+		contract(fm, c.Body, add)
 	}
 	return errs
 }
 
-// contract checks the §10.2 fields. On any other type these keys are producer extensions.
-func contract(fm *Map, add func(string, ...string)) {
+// contract checks the §10.2 fields and the §10.3 computation. On any other type these keys are producer extensions.
+func contract(fm *Map, body string, add func(string, ...string)) {
 	if !nonEmpty(field(fm, "runtime")) {
 		add("runtime", "runtime is required for an Attested Computation")
 	}
-	if v, ok := fm.Get("computation"); ok && !nonEmpty(v) {
-		add("computation", "computation must be a path")
+	blocks := computationBlocks(body)
+	if v, ok := fm.Get("computation"); ok {
+		if !nonEmpty(v) {
+			add("computation", "computation must be a path")
+		} else if blocks > 0 {
+			add("computation", fmt.Sprintf("computation names a file, so the body must not also hold a code block under # Computation: found %d", blocks))
+		}
+	} else if blocks != 1 {
+		add("computation", fmt.Sprintf("the body must hold exactly one code block under # Computation, or computation must name a file: found %d", blocks))
 	}
 	if v, ok := fm.Get("parameters"); ok {
 		params, isList := v.([]any)
@@ -99,6 +103,60 @@ func contract(fm *Map, add func(string, ...string)) {
 			}
 		}
 	}
+}
+
+var (
+	heading            = regexp.MustCompile(`^(#{1,6})(?:[ \t]|$)`)
+	computationHeading = regexp.MustCompile(`^#[ \t]+Computation(?:[ \t]+#*)?[ \t]*(?:\{[^}]*\})?[ \t]*$`)
+)
+
+// computationBlocks counts the fenced and indented code blocks under the body's top-level # Computation headings.
+// ponytail: line-based, not CommonMark; a list item or footnote continued four spaces in reads as code, and a setext heading is not seen.
+func computationBlocks(body string) int {
+	n, in, openFence, indented, blank := 0, false, "", false, true
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimLeft(line, " ")
+		lead := len(line) - len(trimmed)
+		if openFence != "" {
+			// Only a bare fence at least as long as the opening one closes it.
+			if rest := strings.TrimLeft(trimmed, openFence[:1]); lead < 4 && len(trimmed)-len(rest) >= len(openFence) && strings.TrimSpace(rest) == "" {
+				openFence, blank = "", true
+			}
+			continue
+		}
+		switch h := heading.FindStringSubmatch(trimmed); {
+		case strings.TrimSpace(line) == "":
+			blank = true
+			continue
+		case lead < 4 && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")):
+			openFence = strings.Repeat(trimmed[:1], len(trimmed)-len(strings.TrimLeft(trimmed, trimmed[:1])))
+			if in {
+				n++
+			}
+			indented = false
+		// A tab after up to three spaces reaches column four.
+		case lead >= 4 || strings.HasPrefix(trimmed, "\t"):
+			// An indented line right after a paragraph continues it; after a blank line it starts code.
+			if !indented && blank {
+				indented = true
+				if in {
+					n++
+				}
+			}
+		case h != nil:
+			// A subheading stays inside the section; the next top-level heading ends it.
+			if len(h[1]) == 1 {
+				in = computationHeading.MatchString(trimmed)
+			}
+			// Code MAY follow a heading without a blank line between.
+			indented, blank = false, true
+			continue
+		default:
+			indented = false
+		}
+		blank = false
+	}
+	return n
 }
 
 func sources(v any) []string {

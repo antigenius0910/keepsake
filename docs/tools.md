@@ -102,6 +102,14 @@ is refused. Timestamps MUST carry an offset, such as `2026-06-30T14:00:00Z`. A
 field that was already stored is not rechecked, so an imported concept stays
 editable. A retype to an `Attested Computation` checks its contract fields.
 
+An `Attested Computation` MUST hold its computation in one place: either
+`computation` names a file and the body has no code block under
+`# Computation`, or the body has exactly one code block there, fenced or
+indented. If a write changes `computation`, or its body edit changes how many
+code blocks are under `# Computation`, the write is refused when the result
+breaks the rule. A `relate` on a stored concept that already breaks the rule
+still works.
+
 ## Errors
 
 An argument that fails the advertised schema comes back as a tool error the

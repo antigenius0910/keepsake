@@ -130,7 +130,9 @@ curl -X PUT --data-binary @bundle.tgz \
 - The server runs one upload at a time. Another upload meanwhile gets a 503 with
   `Retry-After: 5`.
 - Links to concepts outside the bundle are not checked. Operators SHOULD run
-  `keepsake validate` on the directory first to catch them.
+  `keepsake validate` on the directory first and read its `warning:` lines.
+  It exits 0 when links are broken but nothing else is wrong, since OKF allows
+  broken links. A gate on its exit code alone does not catch them.
 - The archive MUST end with tar's end-of-archive marker. A stream cut between
   entries gets a 400, so it cannot delete the files it lost.
 
@@ -153,22 +155,42 @@ tenant. The Go runtime and process metrics are included as well.
 
 ## Logs
 
-`keepsake serve` writes JSON lines to stderr. `logLevel` in the chart, or
-`KEEPSAKE_LOG_LEVEL`, sets the level: `debug`, `info` (the default), `warn` or
-`error`.
+`keepsake serve` and `keepsake prune` write JSON lines to stderr, including the
+`exiting` line that explains a failed start. A usage error is still plain text.
+`logLevel` in the chart, or `KEEPSAKE_LOG_LEVEL`, sets the level: `debug`,
+`info` (the default), `warn` or `error`. The other commands print plain text.
+
+Every line logged during a tool call carries `tool`, `tenant` and `actor`.
+Every `/bundle` line after token verification carries `tenant` and `actor`,
+except `api`.
+
+The app and console ports log one `request` line per request. A response below
+400 logs at `debug`, so readiness probes stay out of an `info` log. From 400 up
+it logs at `warn`, which covers a request refused before any tool runs.
 
 | Message | Level | Fields |
 | --- | --- | --- |
-| `tool call` | info | `tool`, `outcome`, `duration_ms`, `tenant`, `actor` |
-| `database unavailable` | warn | `tool` or `route`, `err` |
+| `request` | debug / warn | `method`, `route`, `status`, `duration_ms` |
+| `tool call` | info | `outcome`, `duration_ms` |
+| `tool call failed` | error | `err` |
+| `tool call panicked` | error | `panic`, `stack` |
+| `tool call without a tenant` | error | none |
+| `tool call arguments unreadable` | warn | `err` |
+| `database unavailable` | warn | `err`, and `route` on `/bundle` |
+| `bundle replaced` | info | `written`, `deleted` |
+| `refused /mcp request` / `refused /bundle request` | warn | `reason`; on `/bundle`, a token refused for its scope adds `tenant` and `actor` |
+| `read not logged` | warn | `tenant`, `err` |
 | `console login` / `console login refused` | info / warn | `remote_addr` |
 | `api` | error | `method`, `route`, `err` |
-| `tool call failed` | error | `tool`, `err` |
-| `bundle replaced` | info | `tenant`, `actor`, `written`, `deleted` |
-| `refused /mcp request` | warn | `reason` |
-| `refused /bundle request` | warn | `reason`, and `actor` once the token verifies |
+| `pruned` | info | `tenant`, `reads`, `revisions` |
+| `exiting` | error | `err` |
+
+A failed or panicking tool call answers its client `internal error` and leaves the
+detail to the log.
 
 No line carries a tool's arguments, a concept body, a token or a password.
+`route` is the matched pattern, such as `GET /concepts/{path...}`, never the
+path, since a path names a concept.
 `remote_addr` is the TCP peer, so behind a proxy it names the proxy. At `warn`,
 the per-call lines are dropped.
 
